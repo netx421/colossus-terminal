@@ -5,7 +5,7 @@ PKG      := gtk+-3.0 vte-2.91
 INCLUDES := $(shell pkg-config --cflags $(PKG))
 LIBS     := $(shell pkg-config --libs $(PKG))
 
-TARGET   := Terminal
+TARGET   := terminal
 SRC      := main.cpp
 
 all: $(TARGET)
