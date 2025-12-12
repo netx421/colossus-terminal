@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=Terminal
-GenericName=Terminal
+Name=terminal
+GenericName=terminal
 Comment=COLOSSUS Terminal — monochrome operations console
 Exec=terminal
 Icon=colossus-terminal
