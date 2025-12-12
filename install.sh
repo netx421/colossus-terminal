@@ -1,76 +1,119 @@
-
----
-
-## `install.sh`
-
-```bash
 #!/usr/bin/env bash
-set -euo pipefail
+set -e
 
-APP_ID="colossus-terminal"
-INSTALL_DIR="${HOME}/.local/share/${APP_ID}"
-BIN_DIR="${HOME}/.local/bin"
-APP_DIR="${HOME}/.local/share/applications"
+# Build artifact name from Makefile
+BIN_BUILD="colossus-terminal"
+# Name of the installed executable
+BIN_INSTALL="colossus-terminal"
 
-DESKTOP_SRC="./colossus-terminal.desktop"
-DESKTOP_DST="${APP_DIR}/Terminal.desktop"
+echo "[CT-001] INITIALIZING TERMINAL DEPLOYMENT SEQUENCE..."
+sleep 1
 
-echo "== COLOSSUS-TERMINAL :: INSTALLER =="
+# --------------------------------------------------------------------
+#  PACKAGE ACQUISITION
+# --------------------------------------------------------------------
+echo "[CT-001] DETECTING HOST DISTRIBUTION..."
 
-# 1) sanity check
-if [[ ! -f "Makefile" ]] || [[ ! -d "config" ]] || [[ ! -d "src" ]]; then
-  echo "[ERROR] Run this from the repo root (where Makefile/config/src live)."
-  exit 1
+if command -v pacman &>/dev/null; then
+    echo "[CT-001] ARCH LINUX / MANJARO DETECTED"
+    sudo pacman -S --needed --noconfirm \
+        base-devel \
+        gtk3 \
+        vte3 \
+        starship \
+        pkgconf
+
+elif command -v apt &>/dev/null; then
+    echo "[CT-001] DEBIAN / UBUNTU / LINUX MINT DETECTED"
+    sudo apt update
+    sudo apt install -y \
+        build-essential \
+        libgtk-3-dev \
+        libvte-2.91-dev \
+        starship \
+        pkg-config
+
+elif command -v dnf &>/dev/null; then
+    echo "[CT-001] FEDORA DETECTED"
+    sudo dnf install -y \
+        gtk3-devel \
+        vte291-devel \
+        starship \
+        pkgconf \
+        gcc-c++
+
+elif command -v zypper &>/dev/null; then
+    echo "[CT-001] OPENSUSE DETECTED"
+    sudo zypper install -y \
+        gtk3-devel \
+        vte2-devel \
+        starship \
+        pkgconf \
+        gcc-c++
+
+else
+    echo "[CT-001] ERROR: Unsupported Linux distribution."
+    echo "Install the following dependencies manually:"
+    echo "    GTK3, VTE (2.91), starship, pkg-config, C++ build tools"
+    exit 1
 fi
 
-# 2) build
-echo "[BUILD] make"
+echo "[CT-001] SYSTEM DEPENDENCIES VERIFIED."
+
+# --------------------------------------------------------------------
+#  BUILD PROCESS
+# --------------------------------------------------------------------
+echo "[CT-002] COMMENCING BUILD OF COLOSSUS TERMINAL NODE..."
+
+make clean || true
 make
 
-# 3) install payload
-echo "[DEPLOY] ${INSTALL_DIR}"
-mkdir -p "${INSTALL_DIR}"
-rsync -a --delete \
-  --exclude ".git" \
-  --exclude "build" \
-  --exclude "*.o" \
-  --exclude "${APP_ID}" \
-  ./ "${INSTALL_DIR}/"
-
-# Ensure binary is present in install dir (copy the freshly built one)
-cp -f "./colossus-terminal" "${INSTALL_DIR}/colossus-terminal"
-chmod +x "${INSTALL_DIR}/colossus-terminal"
-
-# 4) wrapper in ~/.local/bin so Exec works anywhere + preserves relative config paths
-echo "[WRAPPER] ${BIN_DIR}/colossus-terminal"
-mkdir -p "${BIN_DIR}"
-cat > "${BIN_DIR}/colossus-terminal" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-APP_DIR="${HOME}/.local/share/colossus-terminal"
-cd "${APP_DIR}"
-exec "${APP_DIR}/colossus-terminal" "$@"
-EOF
-chmod +x "${BIN_DIR}/colossus-terminal"
-
-# 5) desktop entry as "Terminal" in the app drawer
-echo "[DESKTOP] ${DESKTOP_DST}"
-mkdir -p "${APP_DIR}"
-if [[ ! -f "${DESKTOP_SRC}" ]]; then
-  echo "[ERROR] Missing ${DESKTOP_SRC} in repo root."
-  exit 1
-fi
-cp -f "${DESKTOP_SRC}" "${DESKTOP_DST}"
-
-# 6) refresh desktop database if available (optional)
-if command -v update-desktop-database >/dev/null 2>&1; then
-  update-desktop-database "${APP_DIR}" >/dev/null 2>&1 || true
+if [ ! -f "$BIN_BUILD" ]; then
+    echo "[CT-002] ERROR: Build failed. Binary '$BIN_BUILD' not found."
+    exit 1
 fi
 
-echo
-echo "== INSTALL COMPLETE =="
-echo "Launch from app drawer: Terminal"
-echo "Or run: colossus-terminal"
-echo
-echo "Prompt config:"
-echo "  ${INSTALL_DIR}/config/starship-colossus.toml"
+echo "[CT-002] BUILD SUCCESSFUL. BINARY READY: $BIN_BUILD"
+
+# --------------------------------------------------------------------
+#  INSTALLATION PROCEDURE
+# --------------------------------------------------------------------
+echo "[CT-003] INSTALLING SYSTEM FILES..."
+
+# Install config directory (bashrc + starship TOML)
+if [ -d config ]; then
+    sudo mkdir -p /usr/local/share/colossus-terminal/config
+    sudo cp -r config/* /usr/local/share/colossus-terminal/config/
+else
+    echo "[CT-003] WARNING: 'config' directory not found; skipping config install."
+fi
+
+# Install executable
+sudo cp "$BIN_BUILD" /usr/local/bin/"$BIN_INSTALL"
+sudo chmod +x /usr/local/bin/"$BIN_INSTALL"
+
+# Optional: install icon if present
+if [ -f colossus-terminal.png ]; then
+    echo "[CT-003] INSTALLING APPLICATION ICON..."
+    sudo mkdir -p /usr/local/share/icons/hicolor/256x256/apps
+    sudo cp colossus-terminal.png \
+        /usr/local/share/icons/hicolor/256x256/apps/colossus-terminal.png
+else
+    echo "[CT-003] NOTICE: colossus-terminal.png not found; skipping icon install."
+fi
+
+# Install .desktop entry for drun / app menus
+if [ -f colossus-terminal.desktop ]; then
+    echo "[CT-003] INSTALLING DESKTOP ENTRY..."
+    sudo cp colossus-terminal.desktop /usr/share/applications/colossus-terminal.desktop
+else
+    echo "[CT-003] WARNING: colossus-terminal.desktop not found; skipping desktop entry install."
+fi
+
+echo "[CT-004] INSTALLATION COMPLETE."
+echo "[CT-004] EXECUTABLE:     /usr/local/bin/$BIN_INSTALL"
+echo "[CT-004] CONFIG:         /usr/local/share/colossus-terminal/config"
+echo "[CT-004] DESKTOP ENTRY:  /usr/share/applications/colossus-terminal.desktop"
+echo "[CT-004] LAUNCH VIA APP DRAWER: Terminal"
+echo "[CT-004] YOU MAY NOW ISSUE: 'colossus-terminal' FROM ANY SHELL."
+echo "[CT-004] END OF LINE."
