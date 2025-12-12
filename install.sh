@@ -2,9 +2,9 @@
 set -e
 
 # Build artifact name from Makefile
-BIN_BUILD="colossus-terminal"
+BIN_BUILD="terminal"
 # Name of the installed executable
-BIN_INSTALL="colossus-terminal"
+BIN_INSTALL="terminal"
 
 echo "[CT-001] INITIALIZING TERMINAL DEPLOYMENT SEQUENCE..."
 sleep 1
@@ -82,8 +82,8 @@ echo "[CT-003] INSTALLING SYSTEM FILES..."
 
 # Install config directory (bashrc + starship TOML)
 if [ -d config ]; then
-    sudo mkdir -p /usr/local/share/colossus-terminal/config
-    sudo cp -r config/* /usr/local/share/colossus-terminal/config/
+    sudo mkdir -p /usr/local/share/terminal/config
+    sudo cp -r config/* /usr/local/share/terminal/config/
 else
     echo "[CT-003] WARNING: 'config' directory not found; skipping config install."
 fi
@@ -93,27 +93,27 @@ sudo cp "$BIN_BUILD" /usr/local/bin/"$BIN_INSTALL"
 sudo chmod +x /usr/local/bin/"$BIN_INSTALL"
 
 # Optional: install icon if present
-if [ -f colossus-terminal.png ]; then
+if [ -f terminal.png ]; then
     echo "[CT-003] INSTALLING APPLICATION ICON..."
     sudo mkdir -p /usr/local/share/icons/hicolor/256x256/apps
-    sudo cp colossus-terminal.png \
-        /usr/local/share/icons/hicolor/256x256/apps/colossus-terminal.png
+    sudo cp terminal.png \
+        /usr/local/share/icons/hicolor/256x256/apps/terminal.png
 else
-    echo "[CT-003] NOTICE: colossus-terminal.png not found; skipping icon install."
+    echo "[CT-003] NOTICE: terminal.png not found; skipping icon install."
 fi
 
 # Install .desktop entry for drun / app menus
-if [ -f colossus-terminal.desktop ]; then
+if [ -f terminal.desktop ]; then
     echo "[CT-003] INSTALLING DESKTOP ENTRY..."
-    sudo cp colossus-terminal.desktop /usr/share/applications/colossus-terminal.desktop
+    sudo cp terminal.desktop /usr/share/applications/terminal.desktop
 else
-    echo "[CT-003] WARNING: colossus-terminal.desktop not found; skipping desktop entry install."
+    echo "[CT-003] WARNING: terminal.desktop not found; skipping desktop entry install."
 fi
 
 echo "[CT-004] INSTALLATION COMPLETE."
 echo "[CT-004] EXECUTABLE:     /usr/local/bin/$BIN_INSTALL"
-echo "[CT-004] CONFIG:         /usr/local/share/colossus-terminal/config"
-echo "[CT-004] DESKTOP ENTRY:  /usr/share/applications/colossus-terminal.desktop"
+echo "[CT-004] CONFIG:         /usr/local/share/terminal/config"
+echo "[CT-004] DESKTOP ENTRY:  /usr/share/applications/terminal.desktop"
 echo "[CT-004] LAUNCH VIA APP DRAWER: Terminal"
-echo "[CT-004] YOU MAY NOW ISSUE: 'colossus-terminal' FROM ANY SHELL."
+echo "[CT-004] YOU MAY NOW ISSUE: 'terminal' FROM ANY SHELL."
 echo "[CT-004] END OF LINE."
