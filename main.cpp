@@ -6,29 +6,81 @@
 // - Right-click context menu
 // - Uses system GTK theme and your default $SHELL
 //
-// This version fixes the spawn_async signature properly.
+// Added (reliable):
+// - Argument passing: -e "cmd", -e cmd args..., --execute, and "-- cmd args..."
+// - Parse argv BEFORE gtk_init() (GTK can rewrite argv)
+// - Logs to /tmp/colossus-terminal.log
+// - If spawn fails: shows the error *inside the terminal* (not just stderr)
 
 #include <gtk/gtk.h>
 #include <vte/vte.h>
+
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <vector>
+#include <fstream>
+#include <sstream>
 
+// ─────────────────────────────────────────────
+//  Logging (works even if no controlling TTY)
+// ─────────────────────────────────────────────
+static void log_line(const std::string& s) {
+    std::ofstream f("/tmp/colossus-terminal.log", std::ios::app);
+    if (!f) return;
+    f << s << "\n";
+}
+
+static std::string join_argv(const std::vector<std::string>& v) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (i) oss << " ";
+        oss << "\"" << v[i] << "\"";
+    }
+    return oss.str();
+}
+
+// ─────────────────────────────────────────────
+//  Zoom helper
+// ─────────────────────────────────────────────
 static void adjust_font_scale(VteTerminal* term, double factor_delta) {
     double scale = vte_terminal_get_font_scale(term);
     scale += factor_delta;
-    if (scale < 0.5)
-        scale = 0.5;
-    if (scale > 3.0)
-        scale = 3.0;
+    if (scale < 0.5) scale = 0.5;
+    if (scale > 3.0) scale = 3.0;
     vte_terminal_set_font_scale(term, scale);
 }
 
+// ─────────────────────────────────────────────
+//  Close window when child exits
+// ─────────────────────────────────────────────
 static void on_child_exited(VteTerminal* /*term*/, gint /*status*/, gpointer user_data) {
     GtkWindow* win = GTK_WINDOW(user_data);
-    gtk_window_close(win);   // this will trigger the "destroy" signal and gtk_main_quit
+    gtk_window_close(win);
 }
 
+// ─────────────────────────────────────────────
+//  Helper: show a message inside the terminal
+// ─────────────────────────────────────────────
+static void terminal_notice(VteTerminal* term, const std::string& msg) {
+    std::string m = "\r\n[COLOSSUS] " + msg + "\r\n";
+    vte_terminal_feed(term, m.c_str(), (gssize)m.size());
+}
 
+// ─────────────────────────────────────────────
+//  Spawn callback: prints/logs errors
+// ─────────────────────────────────────────────
+static void on_spawn_ready(VteTerminal* term, GPid pid, GError* error, gpointer /*user_data*/) {
+    if (error) {
+        std::string e = std::string("spawn failed: ") + error->message;
+        log_line(e);
+        terminal_notice(term, e);
+        return;
+    }
+
+    // Success (still log it)
+    log_line(std::string("spawn ok, pid=") + std::to_string((int)pid));
+}
 
 // ─────────────────────────────────────────────
 //  Helper: Parse grayscale hex color
@@ -45,8 +97,8 @@ static void parse_rgba(const char* hex, GdkRGBA* out) {
 // ─────────────────────────────────────────────
 static void set_grayscale_palette(VteTerminal* term) {
     GdkRGBA fg, bg;
-    parse_rgba("#d0d0d0", &fg);  // foreground = light gray
-    parse_rgba("#050505", &bg);  // background = near black
+    parse_rgba("#d0d0d0", &fg);
+    parse_rgba("#050505", &bg);
 
     const char* hex[16] = {
         "#000000", "#202020", "#404040", "#606060",
@@ -69,37 +121,31 @@ static gboolean on_key(GtkWidget*, GdkEventKey* e, gpointer data) {
     VteTerminal* term = VTE_TERMINAL(data);
     bool ctrl = (e->state & GDK_CONTROL_MASK) != 0;
 
-    if (!ctrl)
-        return FALSE;
+    if (!ctrl) return FALSE;
 
-    // Ctrl + C (copy or SIGINT)
     if (e->keyval == GDK_KEY_c || e->keyval == GDK_KEY_C) {
         if (vte_terminal_get_has_selection(term)) {
             vte_terminal_copy_clipboard_format(term, VTE_FORMAT_TEXT);
             return TRUE;
         }
-        return FALSE;  // let ^C go to the shell
+        return FALSE; // let ^C through
     }
 
-    // Ctrl + V (paste)
     if (e->keyval == GDK_KEY_v || e->keyval == GDK_KEY_V) {
         vte_terminal_paste_clipboard(term);
         return TRUE;
     }
 
-    // ── Zoom: Ctrl + + / Ctrl + = ───────────────────────
     if (e->keyval == GDK_KEY_plus || e->keyval == GDK_KEY_equal || e->keyval == GDK_KEY_KP_Add) {
-        adjust_font_scale(term, 0.1);   // zoom in
+        adjust_font_scale(term, 0.1);
         return TRUE;
     }
 
-    // ── Zoom: Ctrl + - ─────────────────────────────────
     if (e->keyval == GDK_KEY_minus || e->keyval == GDK_KEY_KP_Subtract) {
-        adjust_font_scale(term, -0.1);  // zoom out
+        adjust_font_scale(term, -0.1);
         return TRUE;
     }
 
-    // ── Reset zoom: Ctrl + 0 ───────────────────────────
     if (e->keyval == GDK_KEY_0 || e->keyval == GDK_KEY_KP_0) {
         vte_terminal_set_font_scale(term, 1.0);
         return TRUE;
@@ -107,7 +153,6 @@ static gboolean on_key(GtkWidget*, GdkEventKey* e, gpointer data) {
 
     return FALSE;
 }
-
 
 // ─────────────────────────────────────────────
 //  Right-click menu callbacks
@@ -127,8 +172,7 @@ static void on_select_all(GtkMenuItem*, gpointer user_data) {
 }
 
 static gboolean on_button_press(GtkWidget*, GdkEventButton* event, gpointer user_data) {
-    if (event->button != 3)
-        return FALSE;
+    if (event->button != 3) return FALSE;
 
     VteTerminal* term = VTE_TERMINAL(user_data);
     GtkWidget* menu = gtk_menu_new();
@@ -147,14 +191,75 @@ static gboolean on_button_press(GtkWidget*, GdkEventButton* event, gpointer user
 
     gtk_widget_show_all(menu);
     gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent*)event);
-
     return TRUE;
+}
+
+// ─────────────────────────────────────────────
+//  CLI: build argv for VTE spawn
+// ─────────────────────────────────────────────
+static std::vector<std::string> build_spawn_argv(int argc, char** argv) {
+    // Supported:
+    //   terminal -e "cmd..."
+    //   terminal -e cmd arg1 arg2...
+    //   terminal --execute "cmd..."
+    //   terminal -- cmd arg1...
+
+    int i = 1;
+    bool exec_mode = false;
+
+    for (; i < argc; ++i) {
+        std::string a = argv[i];
+
+        if (a == "--") {
+            exec_mode = true;
+            ++i;
+            break;
+        }
+        if (a == "-e" || a == "--execute") {
+            exec_mode = true;
+            ++i;
+            break;
+        }
+    }
+
+    if (!exec_mode || i >= argc) return {};
+
+    const int remaining = argc - i;
+    std::vector<std::string> out;
+
+    const char* shell = std::getenv("SHELL");
+    if (!shell || !*shell) shell = "/bin/bash";
+
+    if (remaining == 1) {
+        // IMPORTANT: Use user's shell -lc "cmd" (more consistent than /bin/sh)
+        out = {shell, "-lc", std::string(argv[i])};
+    } else {
+        out.reserve((size_t)remaining);
+        for (; i < argc; ++i) out.emplace_back(argv[i]);
+    }
+
+    return out;
 }
 
 // ─────────────────────────────────────────────
 //  MAIN
 // ─────────────────────────────────────────────
 int main(int argc, char** argv) {
+    // Parse BEFORE GTK touches argv
+    auto cmd = build_spawn_argv(argc, argv);
+
+    // Reset log each run (optional). Comment out if you want append-only.
+    {
+        std::ofstream f("/tmp/colossus-terminal.log", std::ios::trunc);
+        if (f) f << "COLOSSUS Terminal start\n";
+    }
+
+    if (!cmd.empty()) {
+        log_line("exec requested: " + join_argv(cmd));
+    } else {
+        log_line("no exec requested: spawning default shell");
+    }
+
     gtk_init(&argc, &argv);
 
     GtkWidget* win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
@@ -166,40 +271,41 @@ int main(int argc, char** argv) {
 
     set_grayscale_palette(term);
 
-    // Spawn shell (keeps your starship prompt)
-    const char* shell = std::getenv("SHELL");
-    if (!shell) shell = "/bin/bash";
-
     const char* home = std::getenv("HOME");
     if (!home) home = "/";
 
-    char* argv_shell[] = { const_cast<char*>(shell), nullptr };
+    // Build spawn argv (char* pointers must stay valid; cmd stays alive in main)
+    std::vector<char*> spawn_argv;
+    if (!cmd.empty()) {
+        for (auto& s : cmd)
+            spawn_argv.push_back(const_cast<char*>(s.c_str()));
+        spawn_argv.push_back(nullptr);
+    } else {
+        const char* shell = std::getenv("SHELL");
+        if (!shell || !*shell) shell = "/bin/bash";
+        spawn_argv.push_back(const_cast<char*>(shell));
+        spawn_argv.push_back(nullptr);
+    }
 
     vte_terminal_spawn_async(
         term,
         VTE_PTY_DEFAULT,
         home,
-        argv_shell,
+        spawn_argv.data(),
         nullptr,                 // inherit environment
         G_SPAWN_SEARCH_PATH,
-        nullptr,                 // child_setup
-        nullptr,                 // child_setup_data
-        nullptr,                 // child_setup_data_destroy
-        -1,                      // no timeout
-        nullptr,                 // cancellable
-        nullptr,                 // callback
-        nullptr                  // user_data
+        nullptr, nullptr, nullptr,
+        -1,
+        nullptr,
+        on_spawn_ready,          // logs + writes errors into terminal
+        nullptr
     );
 
-    // Connect signals
     g_signal_connect(win, "destroy", G_CALLBACK(gtk_main_quit), nullptr);
     g_signal_connect(win, "key-press-event", G_CALLBACK(on_key), term);
     gtk_widget_add_events(term_widget, GDK_BUTTON_PRESS_MASK);
     g_signal_connect(term_widget, "button-press-event", G_CALLBACK(on_button_press), term);
-
-	g_signal_connect(term, "child-exited",
-                 	G_CALLBACK(on_child_exited),
-                 	win);
+    g_signal_connect(term, "child-exited", G_CALLBACK(on_child_exited), win);
 
     gtk_container_add(GTK_CONTAINER(win), term_widget);
 
