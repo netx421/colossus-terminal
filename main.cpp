@@ -1,16 +1,22 @@
-// COLOSSUS Terminal v0.3 (Monochrome Edition)
+// COLOSSUS Terminal v0.4 (Monochrome Edition)
 //
 // C++ + GTK3 + VTE
-// - Pure grayscale palette (no color/hue at all)
-// - Ctrl+C / Ctrl+V copy/paste
+// - Pure grayscale palette (no hue)
+// - Ctrl+C / Ctrl+V copy/paste (selection-aware)
+// - Ctrl+Shift+C / Ctrl+Shift+V also supported
 // - Right-click context menu
-// - Uses system GTK theme and your default $SHELL
-//
-// Added (reliable):
-// - Argument passing: -e "cmd", -e cmd args..., --execute, and "-- cmd args..."
-// - Parse argv BEFORE gtk_init() (GTK can rewrite argv)
+// - CWD handling: honors process cwd + supports --cwd PATH / --cwd=PATH (also file:// URIs)
+// - Drag & drop paths: drop files/folders to insert shell-escaped paths
+// - Smart title updating: "COLOSSUS — <terminal title>"
+// - CLI execution: -e, --execute, and "-- cmd args..."
 // - Logs to /tmp/colossus-terminal.log
-// - If spawn fails: shows the error *inside the terminal* (not just stderr)
+// - Spawn failures are printed inside the terminal
+//
+// Build:
+//   g++ colossus-terminal.cpp -o colossus-terminal `pkg-config --cflags --libs gtk+-3.0 vte-2.91`
+//
+// Notes:
+//   - If your distro uses a different vte pkg-config name, check: pkg-config --list-all | grep vte
 
 #include <gtk/gtk.h>
 #include <vte/vte.h>
@@ -21,9 +27,10 @@
 #include <vector>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
 
 // ─────────────────────────────────────────────
-//  Logging (works even if no controlling TTY)
+//  Logging
 // ─────────────────────────────────────────────
 static void log_line(const std::string& s) {
     std::ofstream f("/tmp/colossus-terminal.log", std::ios::app);
@@ -38,6 +45,17 @@ static std::string join_argv(const std::vector<std::string>& v) {
         oss << "\"" << v[i] << "\"";
     }
     return oss.str();
+}
+
+static std::string trim(const std::string& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && std::isspace((unsigned char)s[a])) a++;
+    while (b > a && std::isspace((unsigned char)s[b-1])) b--;
+    return s.substr(a, b - a);
+}
+
+static bool starts_with(const std::string& s, const std::string& p) {
+    return s.size() >= p.size() && std::equal(p.begin(), p.end(), s.begin());
 }
 
 // ─────────────────────────────────────────────
@@ -77,8 +95,6 @@ static void on_spawn_ready(VteTerminal* term, GPid pid, GError* error, gpointer 
         terminal_notice(term, e);
         return;
     }
-
-    // Success (still log it)
     log_line(std::string("spawn ok, pid=") + std::to_string((int)pid));
 }
 
@@ -108,44 +124,54 @@ static void set_grayscale_palette(VteTerminal* term) {
     };
 
     GdkRGBA palette[16];
-    for (int i = 0; i < 16; ++i)
-        parse_rgba(hex[i], &palette[i]);
+    for (int i = 0; i < 16; ++i) parse_rgba(hex[i], &palette[i]);
 
     vte_terminal_set_colors(term, &fg, &bg, palette, 16);
 }
 
 // ─────────────────────────────────────────────
-//  Keyboard Logic Buttons
+//  Keyboard shortcuts
 // ─────────────────────────────────────────────
 static gboolean on_key(GtkWidget*, GdkEventKey* e, gpointer data) {
     VteTerminal* term = VTE_TERMINAL(data);
-    bool ctrl = (e->state & GDK_CONTROL_MASK) != 0;
+    bool ctrl  = (e->state & GDK_CONTROL_MASK) != 0;
+    bool shift = (e->state & GDK_SHIFT_MASK) != 0;
 
     if (!ctrl) return FALSE;
 
+    // Ctrl+Shift+C / Ctrl+Shift+V (expected terminal behavior)
+    if (shift && (e->keyval == GDK_KEY_c || e->keyval == GDK_KEY_C)) {
+        if (vte_terminal_get_has_selection(term))
+            vte_terminal_copy_clipboard_format(term, VTE_FORMAT_TEXT);
+        return TRUE;
+    }
+    if (shift && (e->keyval == GDK_KEY_v || e->keyval == GDK_KEY_V)) {
+        vte_terminal_paste_clipboard(term);
+        return TRUE;
+    }
+
+    // Ctrl+C / Ctrl+V (selection-aware: let ^C through if no selection)
     if (e->keyval == GDK_KEY_c || e->keyval == GDK_KEY_C) {
         if (vte_terminal_get_has_selection(term)) {
             vte_terminal_copy_clipboard_format(term, VTE_FORMAT_TEXT);
             return TRUE;
         }
-        return FALSE; // let ^C through
+        return FALSE; // let SIGINT pass
     }
-
     if (e->keyval == GDK_KEY_v || e->keyval == GDK_KEY_V) {
         vte_terminal_paste_clipboard(term);
         return TRUE;
     }
 
+    // Zoom
     if (e->keyval == GDK_KEY_plus || e->keyval == GDK_KEY_equal || e->keyval == GDK_KEY_KP_Add) {
         adjust_font_scale(term, 0.1);
         return TRUE;
     }
-
     if (e->keyval == GDK_KEY_minus || e->keyval == GDK_KEY_KP_Subtract) {
         adjust_font_scale(term, -0.1);
         return TRUE;
     }
-
     if (e->keyval == GDK_KEY_0 || e->keyval == GDK_KEY_KP_0) {
         vte_terminal_set_font_scale(term, 1.0);
         return TRUE;
@@ -155,22 +181,19 @@ static gboolean on_key(GtkWidget*, GdkEventKey* e, gpointer data) {
 }
 
 // ─────────────────────────────────────────────
-//  Right-click menu callbacks
+//  Right-click menu
 // ─────────────────────────────────────────────
 static void on_copy(GtkMenuItem*, gpointer user_data) {
     VteTerminal* term = VTE_TERMINAL(user_data);
     if (vte_terminal_get_has_selection(term))
         vte_terminal_copy_clipboard_format(term, VTE_FORMAT_TEXT);
 }
-
 static void on_paste(GtkMenuItem*, gpointer user_data) {
     vte_terminal_paste_clipboard(VTE_TERMINAL(user_data));
 }
-
 static void on_select_all(GtkMenuItem*, gpointer user_data) {
     vte_terminal_select_all(VTE_TERMINAL(user_data));
 }
-
 static gboolean on_button_press(GtkWidget*, GdkEventButton* event, gpointer user_data) {
     if (event->button != 3) return FALSE;
 
@@ -195,7 +218,7 @@ static gboolean on_button_press(GtkWidget*, GdkEventButton* event, gpointer user
 }
 
 // ─────────────────────────────────────────────
-//  CLI: build argv for VTE spawn
+//  CLI: execution argv for VTE spawn
 // ─────────────────────────────────────────────
 static std::vector<std::string> build_spawn_argv(int argc, char** argv) {
     // Supported:
@@ -231,14 +254,149 @@ static std::vector<std::string> build_spawn_argv(int argc, char** argv) {
     if (!shell || !*shell) shell = "/bin/bash";
 
     if (remaining == 1) {
-        // IMPORTANT: Use user's shell -lc "cmd" (more consistent than /bin/sh)
         out = {shell, "-lc", std::string(argv[i])};
     } else {
         out.reserve((size_t)remaining);
         for (; i < argc; ++i) out.emplace_back(argv[i]);
     }
-
     return out;
+}
+
+// ─────────────────────────────────────────────
+//  CWD parsing / normalization
+// ─────────────────────────────────────────────
+static std::string uri_to_path_if_needed(const std::string& s) {
+    if (g_str_has_prefix(s.c_str(), "file://")) {
+        GError* err = nullptr;
+        char* fn = g_filename_from_uri(s.c_str(), nullptr, &err);
+        if (fn) {
+            std::string out = fn;
+            g_free(fn);
+            if (err) g_error_free(err);
+            return out;
+        }
+        if (err) g_error_free(err);
+    }
+    return s;
+}
+
+static std::string parse_cwd_arg(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--cwd" && i + 1 < argc) {
+            return uri_to_path_if_needed(argv[i + 1]);
+        }
+        if (starts_with(a, "--cwd=")) {
+            return uri_to_path_if_needed(a.substr(6));
+        }
+    }
+    return {};
+}
+
+static std::string resolve_workdir(int argc, char** argv) {
+    const char* home = std::getenv("HOME");
+    if (!home) home = "/";
+
+    std::string wd = parse_cwd_arg(argc, argv);
+
+    if (!wd.empty()) {
+        // If it's a file, switch to its directory
+        if (g_file_test(wd.c_str(), G_FILE_TEST_IS_REGULAR)) {
+            char* dir = g_path_get_dirname(wd.c_str());
+            if (dir) { wd = dir; g_free(dir); }
+        }
+        // Validate directory
+        if (!g_file_test(wd.c_str(), G_FILE_TEST_IS_DIR)) wd.clear();
+    }
+
+    if (wd.empty()) {
+        // Default: process cwd (this is what makes Thunar "Open Terminal Here" work)
+        char* cwd = g_get_current_dir();
+        if (cwd && *cwd) wd = cwd;
+        g_free(cwd);
+    }
+
+    if (wd.empty()) wd = home;
+    return wd;
+}
+
+// ─────────────────────────────────────────────
+//  Shell escaping for dropped paths
+// ─────────────────────────────────────────────
+static std::string shell_escape_single_quotes(const std::string& s) {
+    // Return a POSIX-safe single-quoted string:
+    // 'abc' becomes 'abc'
+    // "a'b" becomes 'a'"'"'b'
+    std::string out;
+    out.reserve(s.size() + 2);
+    out.push_back('\'');
+    for (char c : s) {
+        if (c == '\'') out += "'\"'\"'";
+        else out.push_back(c);
+    }
+    out.push_back('\'');
+    return out;
+}
+
+// ─────────────────────────────────────────────
+//  Drag & drop: insert paths into terminal
+// ─────────────────────────────────────────────
+static void on_drag_data_received(GtkWidget* /*widget*/,
+                                 GdkDragContext* context,
+                                 gint /*x*/, gint /*y*/,
+                                 GtkSelectionData* data,
+                                 guint /*info*/,
+                                 guint time,
+                                 gpointer user_data)
+{
+    VteTerminal* term = VTE_TERMINAL(user_data);
+
+    if (!data) {
+        gtk_drag_finish(context, FALSE, FALSE, time);
+        return;
+    }
+
+    gchar** uris = gtk_selection_data_get_uris(data);
+    if (!uris) {
+        gtk_drag_finish(context, FALSE, FALSE, time);
+        return;
+    }
+
+    std::string chunk;
+    for (int i = 0; uris[i]; ++i) {
+        GError* err = nullptr;
+        char* path = g_filename_from_uri(uris[i], nullptr, &err);
+        if (!path) {
+            if (err) g_error_free(err);
+            continue;
+        }
+
+        std::string p = path;
+        g_free(path);
+
+        if (!chunk.empty()) chunk.push_back(' ');
+        chunk += shell_escape_single_quotes(p);
+    }
+
+    g_strfreev(uris);
+
+    if (!chunk.empty()) {
+        // Feed to child so it appears at prompt/cursor
+        vte_terminal_feed_child(term, chunk.c_str(), (gssize)chunk.size());
+    }
+
+    gtk_drag_finish(context, TRUE, FALSE, time);
+}
+
+// ─────────────────────────────────────────────
+//  Smart title updating
+// ─────────────────────────────────────────────
+static void on_title_changed(VteTerminal* term, gpointer user_data) {
+    GtkWindow* win = GTK_WINDOW(user_data);
+    const char* t = vte_terminal_get_window_title(term);
+    std::string title = "COLOSSUS — ";
+    title += (t && *t) ? t : "Terminal";
+    gtk_window_set_title(win, title.c_str());
 }
 
 // ─────────────────────────────────────────────
@@ -247,18 +405,18 @@ static std::vector<std::string> build_spawn_argv(int argc, char** argv) {
 int main(int argc, char** argv) {
     // Parse BEFORE GTK touches argv
     auto cmd = build_spawn_argv(argc, argv);
+    std::string workdir = resolve_workdir(argc, argv);
 
-    // Reset log each run (optional). Comment out if you want append-only.
+    // Reset log each run
     {
         std::ofstream f("/tmp/colossus-terminal.log", std::ios::trunc);
         if (f) f << "COLOSSUS Terminal start\n";
     }
 
-    if (!cmd.empty()) {
-        log_line("exec requested: " + join_argv(cmd));
-    } else {
-        log_line("no exec requested: spawning default shell");
-    }
+    log_line("workdir: " + workdir);
+
+    if (!cmd.empty()) log_line("exec requested: " + join_argv(cmd));
+    else              log_line("no exec requested: spawning default shell");
 
     gtk_init(&argc, &argv);
 
@@ -269,16 +427,20 @@ int main(int argc, char** argv) {
     GtkWidget* term_widget = vte_terminal_new();
     VteTerminal* term = VTE_TERMINAL(term_widget);
 
+    // QoL defaults
+    vte_terminal_set_scrollback_lines(term, 10000);
+    vte_terminal_set_scroll_on_keystroke(term, TRUE);
+    vte_terminal_set_scroll_on_output(term, FALSE);
+    vte_terminal_set_audible_bell(term, FALSE);
+    vte_terminal_set_visible_bell(term, TRUE);
+    vte_terminal_set_allow_hyperlink(term, TRUE);
+
     set_grayscale_palette(term);
 
-    const char* home = std::getenv("HOME");
-    if (!home) home = "/";
-
-    // Build spawn argv (char* pointers must stay valid; cmd stays alive in main)
+    // Build spawn argv (cmd strings remain alive in main scope)
     std::vector<char*> spawn_argv;
     if (!cmd.empty()) {
-        for (auto& s : cmd)
-            spawn_argv.push_back(const_cast<char*>(s.c_str()));
+        for (auto& s : cmd) spawn_argv.push_back(const_cast<char*>(s.c_str()));
         spawn_argv.push_back(nullptr);
     } else {
         const char* shell = std::getenv("SHELL");
@@ -287,25 +449,38 @@ int main(int argc, char** argv) {
         spawn_argv.push_back(nullptr);
     }
 
+    // Spawn shell/program in desired working directory
     vte_terminal_spawn_async(
         term,
         VTE_PTY_DEFAULT,
-        home,
+        workdir.c_str(),
         spawn_argv.data(),
         nullptr,                 // inherit environment
         G_SPAWN_SEARCH_PATH,
         nullptr, nullptr, nullptr,
         -1,
         nullptr,
-        on_spawn_ready,          // logs + writes errors into terminal
+        on_spawn_ready,
         nullptr
     );
 
+    // Smart title updates
+    g_signal_connect(term, "window-title-changed", G_CALLBACK(on_title_changed), win);
+    on_title_changed(term, win); // initialize title
+
+    // Signals
     g_signal_connect(win, "destroy", G_CALLBACK(gtk_main_quit), nullptr);
     g_signal_connect(win, "key-press-event", G_CALLBACK(on_key), term);
     gtk_widget_add_events(term_widget, GDK_BUTTON_PRESS_MASK);
     g_signal_connect(term_widget, "button-press-event", G_CALLBACK(on_button_press), term);
     g_signal_connect(term, "child-exited", G_CALLBACK(on_child_exited), win);
+
+    // Drag & drop setup
+    GtkTargetEntry targets[] = {
+        {(gchar*)"text/uri-list", 0, 0}
+    };
+    gtk_drag_dest_set(term_widget, GTK_DEST_DEFAULT_ALL, targets, 1, (GdkDragAction)(GDK_ACTION_COPY));
+    g_signal_connect(term_widget, "drag-data-received", G_CALLBACK(on_drag_data_received), term);
 
     gtk_container_add(GTK_CONTAINER(win), term_widget);
 
